@@ -17,6 +17,89 @@ from .create_dialog import WriteNodePanel
 # standard toolkit logger
 logger = sgtk.platform.get_logger(__name__)
 
+# Per-project write-node category overrides, keyed by the ShotGrid
+# Project field sg_color_pipeline (the same field/values used by
+# tk-nuke-projectsettings' COLOR_PIPELINE_PRESETS - see that app's
+# handler.py for the full rationale). Added because different studio
+# projects genuinely use different color pipelines and therefore need
+# different write-node data-type options (colorspace/datatype/
+# compression), unlike NFA's single fixed studio-wide categories: list
+# in this app's own env settings.
+#
+# Each entry here has the exact same shape as one item of the
+# "categories" app setting (see this app's info.yml / env YAML) - a
+# dict with "category_name" and "write_nodes". Only categories present
+# here REPLACE the static YAML list entirely for that project (not
+# merged) - see __get_categories() below for why a full replacement,
+# not a merge, is the correct behavior.
+#
+# A project with sg_color_pipeline unset, or set to a value not present
+# in this table, falls through to the static "categories" app setting
+# unchanged - this app's behavior for every existing project is
+# identical to before this table was added.
+PER_PROJECT_WRITE_CATEGORIES = {
+    "aces_acescg": [
+        {
+            "category_name": "main",
+            "write_nodes": [
+                {
+                    "name": "exr (dwaa 16bit)",
+                    "file_type": "exr",
+                    "render_template": "nuke_shot_render",
+                    "publish_template": "nuke_shot_render_pub",
+                    "tile_color": 2365546239,
+                    "settings": {
+                        "colorspace": "ACES - ACEScg",
+                        "datatype": "16 bit half",
+                        "channels": "rgba",
+                        "compression": "DWAA",
+                    },
+                }
+            ],
+        }
+    ],
+    "aces_2065_1": [
+        {
+            "category_name": "main",
+            "write_nodes": [
+                {
+                    "name": "exr (dwaa 16bit)",
+                    "file_type": "exr",
+                    "render_template": "nuke_shot_render",
+                    "publish_template": "nuke_shot_render_pub",
+                    "tile_color": 2365546239,
+                    "settings": {
+                        "colorspace": "ACES - ACES2065-1",
+                        "datatype": "16 bit half",
+                        "channels": "rgba",
+                        "compression": "DWAA",
+                    },
+                }
+            ],
+        }
+    ],
+    "rec709_sdr": [
+        {
+            "category_name": "main",
+            "write_nodes": [
+                {
+                    "name": "exr (zip 16bit)",
+                    "file_type": "exr",
+                    "render_template": "nuke_shot_render",
+                    "publish_template": "nuke_shot_render_pub",
+                    "tile_color": 2365546239,
+                    "settings": {
+                        "colorspace": "sRGB",
+                        "datatype": "16 bit half",
+                        "channels": "rgba",
+                        "compression": "Zip",
+                    },
+                }
+            ],
+        }
+    ],
+}
+
 
 class NukeWriteNodeHandler(object):
     """
@@ -26,6 +109,68 @@ class NukeWriteNodeHandler(object):
     def __init__(self):
         self.app = sgtk.platform.current_bundle()
         self.sg = self.app.shotgun
+
+    def __get_categories(self):
+        """
+        Resolves the write-node "categories" configuration to use for
+        the current project - see PER_PROJECT_WRITE_CATEGORIES above.
+
+        Reads sg_color_pipeline live from the current context's Project
+        (matching tk-nuke-projectsettings' _get_color_pipeline - same
+        field, same live-query-first approach, so both apps always
+        agree on which pipeline a project is using). Falls back to this
+        app's static "categories" YAML setting if the field is unset,
+        the live query fails, or the value doesn't match any entry in
+        PER_PROJECT_WRITE_CATEGORIES - so an unconfigured/unrecognised
+        project behaves exactly as this app did before this method
+        existed.
+
+        A full replacement of the categories list (not a per-field
+        merge with the YAML default) is deliberate: merging would mean
+        a project's rec709_sdr override silently keeps any OTHER
+        category (e.g. "prerender") from the static YAML with its
+        ACEScg settings still attached, which is not what a project
+        opting into a different color pipeline would expect. If a
+        project needs more than one category, its
+        PER_PROJECT_WRITE_CATEGORIES entry should list all of them.
+
+        Returns the same shape self.app.get_setting("categories")
+        returns.
+        """
+        static_categories = self.app.get_setting("categories")
+
+        pipeline_key = None
+        try:
+            engine = sgtk.platform.current_engine()
+            context = engine.context
+            project = context.project if context else None
+            if project:
+                result = self.sg.find_one(
+                    "Project", [["id", "is", project["id"]]], ["sg_color_pipeline"]
+                )
+                if result and result.get("sg_color_pipeline"):
+                    pipeline_key = result["sg_color_pipeline"]
+        except Exception:
+            logger.warning(
+                "tk-nuke-writenode: live sg_color_pipeline query failed, "
+                "falling back to this app's static 'categories' setting",
+                exc_info=True,
+            )
+            return static_categories
+
+        if not pipeline_key:
+            return static_categories
+
+        if pipeline_key not in PER_PROJECT_WRITE_CATEGORIES:
+            logger.warning(
+                "tk-nuke-writenode: project's sg_color_pipeline value "
+                "'%s' has no entry in PER_PROJECT_WRITE_CATEGORIES, "
+                "falling back to this app's static 'categories' setting",
+                pipeline_key,
+            )
+            return static_categories
+
+        return PER_PROJECT_WRITE_CATEGORIES[pipeline_key]
 
     def render_local(self, node):
         """Render the specified node.
@@ -622,8 +767,10 @@ class NukeWriteNodeHandler(object):
         }
         """
 
-        # Get categories from settings
-        categories = self.app.get_setting("categories")
+        # Get categories from settings - per-project if sg_color_pipeline
+        # is set and recognised, otherwise this app's static YAML list
+        # (see __get_categories).
+        categories = self.__get_categories()
 
         # Create initial dictionary to add settings to
         write_node_settings = {}
@@ -720,9 +867,7 @@ class NukeWriteNodeHandler(object):
         write_category = node["category"].value()
         data_type = node["dataType"].value()
 
-        categories = self.app.get_setting("categories")
-
-        # Iterate trough all categories to find our category
+        categories = self.__get_categories()
         for category in categories:
 
             # If category name matches our name, it is the category
