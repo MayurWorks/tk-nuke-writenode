@@ -311,33 +311,12 @@ class NukeWriteNodeHandler(object):
         """
 
         if knob.name() == "dataType":
-            # Get the settings the node has to be set to
-            configuration = self.__get_node_settings(node)
-
-            # Get internal node settings
-            settings = configuration.get("settings")
-
-            # Open to edit internal node
-            with node:
-                # Get node attribute
-                write_node = nuke.toNode("Write1")
-
-                # Set file type
-                write_node["file_type"].setValue(
-                    configuration.get("file_type")
-                )
-
-                # Set all knob settings
-                for knob, setting in settings.items():
-
-                    try:
-                        write_node[knob].setValue(setting)
-
-                    except Exception as e:
-                        logger.debug(
-                            "Could not apply %s to the knob %s, because %s"
-                            % (setting, knob, str(e))
-                        )
+            # __prepare_write() applies file_type/colorspace/etc. from
+            # this node's current category+dataType AND recalculates
+            # the render path (e.g. switching main -> review changes
+            # both the file type and where it renders), so the "file"
+            # knob never goes stale relative to what's selected.
+            self.__prepare_write(node)
 
             logger.debug("Updated node settings")
 
@@ -746,6 +725,14 @@ class NukeWriteNodeHandler(object):
                         "Could not apply %s to the knob %s, because %s"
                         % (setting, knob, str(e))
                     )
+
+        # Calculate and set the render path immediately, so the node
+        # shows where it will render as soon as it's created, instead
+        # of leaving the "file" knob blank until the first render.
+        # __prepare_write() also (re)applies the settings loop above
+        # and ensures the render directory exists, which is harmless
+        # to redo here.
+        self.__prepare_write(created_write)
 
         return created_write
 
