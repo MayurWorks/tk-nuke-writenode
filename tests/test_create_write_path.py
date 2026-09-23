@@ -59,6 +59,15 @@ class FakeNode:
     def name(self):
         return "/jobs/SlateX/STRM/STRM_E2_0010_comp_v001.nk"
 
+    def setName(self, *_):
+        pass
+
+    def setInput(self, *_):
+        pass
+
+    def setXYpos(self, *_):
+        pass
+
 
 class FakeTemplate:
     def __init__(self, definition):
@@ -108,9 +117,11 @@ class FakeApp:
 
 @pytest.fixture
 def handler_module(monkeypatch, tmp_path):
+    monkeypatch.setattr(os, "makedirs", lambda *a, **k: None)
+
     fake_nuke = types.ModuleType("nuke")
     fake_nuke.root = lambda: FakeNode()
-    fake_nuke.createNode = lambda node_type: FakeNode(node_type)
+    fake_nuke.createNode = lambda node_type, *a, **k: FakeNode(node_type)
 
     created = {}
 
@@ -224,8 +235,8 @@ def _create(hm, handler, category, output_name, data_type):
     fake_nuke = hm["fake_nuke"]
     original_create_node = fake_nuke.createNode
 
-    def create_node(node_type):
-        node = original_create_node(node_type)
+    def create_node(node_type, *a, **k):
+        node = original_create_node(node_type, *a, **k)
         if node_type == "sgWrite":
             hm["created"]["Write1"] = FakeNode("Write")
         return node

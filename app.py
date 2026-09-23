@@ -29,7 +29,9 @@ class TkNukeWriteNode(Application):
         self.handler = self.tk_nuke_writenode.NukeWriteNodeHandler()
 
         # Registering commands
-        create_write_node = lambda: self.handler.create_writenode()
+        # "w" is fully automatic: next free write node, wired to the end
+        # of the comp, no dialog. The dialog stays as "custom...".
+        create_write_node = lambda: self.handler.create_writenode_auto()
         self.engine.register_command(
             "NFA ShotGrid Write Node",
             create_write_node,
@@ -37,6 +39,17 @@ class TkNukeWriteNode(Application):
                 type="node",
                 icon="Write.png",
                 hotkey="w",
+                context=self.context,
+            ),
+        )
+
+        create_custom_write_node = lambda: self.handler.create_writenode()
+        self.engine.register_command(
+            "NFA ShotGrid Write Node (custom...)",
+            create_custom_write_node,
+            dict(
+                type="node",
+                icon="Write.png",
                 context=self.context,
             ),
         )
@@ -55,6 +68,11 @@ class TkNukeWriteNode(Application):
 
         # Adding callbacks
         self.handler.add_callbacks()
+
+        # The engine may start with a script already loaded (or be
+        # re-initialised by a context change with one open), in which case
+        # no load/create callback fires for it.
+        self.handler.schedule_autopilot("init")
 
     def destroy_app(self):
         self.log_debug("Destroying tk-nuke-writenode app")
@@ -154,6 +172,25 @@ class TkNukeWriteNode(Application):
         """
         colorspace = self.handler.get_colorspace(node)
         return colorspace
+
+    def on_before_save(self, script_path=None):
+        """Provision and sync the write nodes for the script about to be
+        saved to script_path (defaults to the current script). Called by
+        the workfiles2 scene-operation hook ahead of save / save-as.
+
+        Args:
+            script_path (str, optional): path the script is saved to
+        """
+        self.handler.on_before_save(script_path)
+
+    def sync_write_nodes(self):
+        """Re-points every ShotGrid write node at the current script
+        version's render path.
+
+        Returns:
+            int: number of write nodes synced
+        """
+        return self.handler.sync_all()
 
     def update_read_nodes(self):
         """Update all read nodes to use the published path"""
