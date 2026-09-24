@@ -56,15 +56,6 @@ class TestNames(object):
         assert autopilot.next_output_name("beauty", [], "beauty", "hero") == "hero"
 
 
-class TestProvisionedMarker(object):
-    def test_round_trip(self):
-        assert autopilot.parse_provisioned("") == set()
-        assert autopilot.parse_provisioned(None) == set()
-        value = autopilot.format_provisioned({"review", "main"})
-        assert value == "main,review"
-        assert autopilot.parse_provisioned(value) == {"main", "review"}
-
-
 class TestSmallHelpers(object):
     def test_channels(self):
         assert autopilot.channels_for(["rgba.red", "rgba.alpha"]) == "rgba"

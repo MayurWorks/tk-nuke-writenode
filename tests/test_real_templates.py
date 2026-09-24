@@ -55,31 +55,70 @@ def test_real_render_templates_need_a_name_the_work_template_lacks(templates):
         templates["nuke_shot_render"].apply_fields(fields)
 
 
-def test_autopilot_resolves_real_paths(monkeypatch, templates):
+def test_on_demand_write_resolves_real_paths(monkeypatch, templates):
     monkeypatch.setattr(os, "makedirs", lambda *a, **k: None)
     env, hm, holder = fake_nuke.install(monkeypatch)
-    holder.app = RealApp(templates)
+    holder.app = RealApp(
+        templates, settings={"follow_script_version": True, "default_category": "main"}
+    )
     plate = env.add("Read", "plate_STRM_E1_0070", 0, 0)
     env.add("Grade", "Grade1", 0, 100, [plate])
     env.root.script_path = script_path(3)
 
     handler = hm.NukeWriteNodeHandler()
-    assert sorted(handler.ensure_auto_write_nodes()) == ["Write_main", "Write_review"]
+    node = handler.create_writenode_auto()
 
-    files = {
-        n.name(): n.children["Write1"]["file"].value()
-        for n in env.nodes
-        if n.children
-    }
     root = "/jobs/SlateX/Artists/EP_1/STRM_E1_0070/Comp/Nuke/Comp"
-    assert files["Write_main"] == (
+    assert node["file"].value() == (
         root + "/renders/main/main/v003/STRM_E1_0070_Comp_main_main_v003.%04d.exr"
     )
-    assert files["Write_review"] == (
-        root + "/previews/STRM_E1_0070_Comp_review_v003.%04d.mov"
+
+    # the review preset resolves through the movie template
+    node["sg_category"].setValue("review")
+    handler.knob_changed(node, node["sg_category"])
+    assert node["file"].value() == (
+        root + "/previews/STRM_E1_0070_Comp_main_v003.%04d.mov"
     )
 
     # version-up follows
     env.root.script_path = script_path(4)
-    assert handler.sync_all() == 2
-    assert "_v004." in env.nodes[-1].children["Write1"]["file"].value()
+    assert handler.sync_all() == 1
+    assert "_v004." in node["file"].value()
+
+
+def test_shipped_shot_config_drives_the_write_nodes(monkeypatch, templates):
+    """Feeds the config repo's own tk-nuke-writenode.yml (shot settings)
+    through the handler, so a typo in the YAML shows up here."""
+    import yaml
+
+    yml = os.path.join(os.path.dirname(CFG), "env", "includes", "settings", "tk-nuke-writenode.yml")
+    if not os.path.isfile(yml):
+        pytest.skip("config repo's env/ folder not found")
+    shot = yaml.safe_load(open(yml))["settings.tk-nuke-writenode.shot"]
+
+    monkeypatch.setattr(os, "makedirs", lambda *a, **k: None)
+    env, hm, holder = fake_nuke.install(monkeypatch)
+    settings = {k: shot[k] for k in shot if k not in ("location", "template_script_work")}
+    holder.app = RealApp(templates, settings=settings)
+    plate = env.add("Read", "plate_STRM_E1_0070", 0, 0)
+    plate.channel_names = ["rgba.red", "rgba.green", "rgba.blue", "rgba.alpha"]
+    env.root.script_path = script_path(1)
+    handler = hm.NukeWriteNodeHandler()
+
+    main = handler.create_writenode_auto()
+    assert (main["sg_output"].value(), main["sg_category"].value()) == ("main", "main")
+    assert main["channels"].value() == "rgba"  # channels: auto, input has alpha
+    assert main["compression"].value() == "DWAA"
+
+    pre = handler.create_writenode_auto()
+    assert pre["sg_output"].value() == "prerender"
+    assert pre["sg_data"].values() == ["exr (dwaa 16bit)", "exr (zip 16bit)", "exr (zip 32bit)"]
+
+    pre["sg_data"].setValue("exr (zip 32bit)")
+    handler.knob_changed(pre, pre["sg_data"])
+    assert pre["datatype"].value() == "32 bit float"
+
+    main["sg_category"].setValue("review")
+    handler.knob_changed(main, main["sg_category"])
+    assert main["file_type"].value() == "mov"
+    assert main["mov64_codec"].value() == "H.264"

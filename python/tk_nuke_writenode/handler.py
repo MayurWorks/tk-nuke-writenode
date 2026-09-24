@@ -130,6 +130,64 @@ PIPELINE_CACHE_SECONDS = 60
 AUTO_READ_PREFIX = "render_"
 
 
+# A ShotGrid write node is a plain Nuke Write node - every knob is the
+# artist's to change - carrying a small "NFA ShotGrid" tab of user knobs.
+# (Older scripts may still hold the sgWrite gizmo group, which stores the
+# same three values in knobs named output / category / dataType.)
+KNOB_TAG = "isShotGridWriteNode"
+KNOB_OUTPUT = "sg_output"
+KNOB_CATEGORY = "sg_category"
+KNOB_DATA = "sg_data"
+# The render path the pipeline last wrote to the node. A "file" that no
+# longer matches it was edited by hand and is left alone.
+KNOB_PATH = "sg_path"
+
+_LEGACY_KNOBS = {"output": "output", "category": "category", "data": "dataType"}
+
+# Label the pipeline puts on the node ("main v003"); anything else in the
+# label knob is the artist's and is never overwritten.
+_LABEL_PATTERN = re.compile(r"^[a-zA-Z0-9]+ v\d{3}$")
+
+_BUTTON_SCRIPT = (
+    "import sgtk\n"
+    "app = sgtk.platform.current_engine().apps['tk-nuke-writenode']\n"
+    "app.%s(nuke.thisNode())"
+)
+
+# Cheap on purpose: knobChanged fires for every knob change on a Write
+# node (including moving it), so bail out before touching sgtk.
+_KNOB_CHANGED_SCRIPT = (
+    "k = nuke.thisKnob()\n"
+    "if k is not None and k.name() in ('sg_category', 'sg_data', 'sg_output'):\n"
+    "    import sgtk\n"
+    "    app = sgtk.platform.current_engine().apps['tk-nuke-writenode']\n"
+    "    app.knob_changed(nuke.thisNode(), k)"
+)
+
+
+def _sg_value(node, key):
+    """output / category / data of a ShotGrid write node (None if absent)."""
+    knob = node.knob("sg_" + key)
+    if knob is None:
+        knob = node.knob(_LEGACY_KNOBS[key])
+    return knob.value() if knob is not None else None
+
+
+def _is_sg_write(node):
+    return node.Class() in ("Write", "Group") and node.knob(KNOB_TAG) is not None
+
+
+@contextlib.contextmanager
+def _inner_write(node):
+    """The Write that actually renders: the node itself, or the Write1
+    inside a legacy sgWrite group."""
+    if node.Class() == "Write":
+        yield node
+    else:
+        with node:
+            yield nuke.toNode("Write1")
+
+
 class NukeWriteNodeHandler(object):
     """
     Main application
@@ -296,7 +354,7 @@ class NukeWriteNodeHandler(object):
             node = nuke.toNode(node)
 
             # Append name to list
-            write_names.append(node["output"].value())
+            write_names.append(_sg_value(node, "output"))
 
         # Get all options possible for write nodes
         write_node_settings = self.__get_write_node_options()
@@ -366,23 +424,53 @@ class NukeWriteNodeHandler(object):
             )
 
     def knob_changed(self, node, knob):
-        """Function called whenever any knob changes on
-        the ShotGrid write node
+        """Function called when the output, category or data knob changes
+        on a ShotGrid write node - the artist picking a different preset.
+
+        A new category swaps the list of data presets; a new preset
+        re-applies that preset's settings (file type, colorspace,
+        compression, ...) and recalculates the render path, so switching
+        main -> review changes both what is written and where.
 
         Args:
             node (attribute): node to process
             knob (attribute): knob that has changed
         """
+        if getattr(self, "_busy", False):
+            return
+        name = knob.name()
+        if name not in (KNOB_CATEGORY, KNOB_DATA, KNOB_OUTPUT, "dataType"):
+            return
 
-        if knob.name() == "dataType":
-            # __prepare_write() applies file_type/colorspace/etc. from
-            # this node's current category+dataType AND recalculates
-            # the render path (e.g. switching main -> review changes
-            # both the file type and where it renders), so the "file"
-            # knob never goes stale relative to what's selected.
-            self.__prepare_write(node, quiet=True)
+        self._busy = True
+        try:
+            if name == KNOB_CATEGORY:
+                options = self.__get_write_node_options()
+                presets = options.get(node[KNOB_CATEGORY].value()) or []
+                if presets:
+                    node[KNOB_DATA].setValues(presets)
+                    node[KNOB_DATA].setValue(presets[0])
 
+            if name == KNOB_OUTPUT:
+                # the output name ends up in the file name: letters and
+                # numbers only. Then only the path depends on it.
+                value = node[KNOB_OUTPUT].value()
+                clean = autopilot.sanitize_output_name(value)
+                if clean and clean != value:
+                    node[KNOB_OUTPUT].setValue(clean)
+                self.__prepare_write(node, quiet=True, create_dirs=False)
+            else:
+                self.__prepare_write(node, quiet=True, mode="full")
             logger.debug("Updated node settings")
+        finally:
+            self._busy = False
+
+    def apply_write_settings(self, node):
+        """The node's "apply studio settings" button: puts every setting of
+        the node's category / preset back to what the pipeline specifies
+        and recalculates the render path (an edited path included)."""
+        if not self.__prepare_write(node, mode="full", create_dirs=False):
+            nuke.message("Could not apply the studio settings to this node.")
 
     def read_from_selected(self):
         """Create read node from the selected node"""
@@ -495,13 +583,13 @@ class NukeWriteNodeHandler(object):
         try:
             if not self.__setting_enabled("auto_read_after_render"):
                 return None
-            with node:
-                file_type = nuke.toNode("Write1")["file_type"].value()
+            with _inner_write(node) as write_node:
+                file_type = write_node["file_type"].value()
             if file_type in MOVIE_FILE_TYPES:
                 return None
             return self.read_from_write(
                 node,
-                name=AUTO_READ_PREFIX + node["output"].value(),
+                name=AUTO_READ_PREFIX + _sg_value(node, "output"),
                 reuse=True,
                 inpanel=False,
             )
@@ -563,39 +651,39 @@ class NukeWriteNodeHandler(object):
                 )
 
     def add_callbacks(self):
-        """Adds callbacks on script load, new script, save and rename"""
+        """Adds callbacks on script load, save and rename"""
         nuke.addOnScriptLoad(self.convert_placeholder_nodes, nodeClass="Root")
 
-        # Autopilot: provision and sync write nodes on every event that
-        # can change what they should look like. All of these only
-        # *schedule* work (nuke.executeDeferred) so it runs after every
-        # other app's Root callback - in particular after
-        # tk-nuke-projectsettings has created the plate Read the write
-        # nodes are hung off, and after tk-nuke-template has built the
-        # comp skeleton.
-        nuke.addOnScriptLoad(self._on_script_load, nodeClass="Root")
-        nuke.addOnCreate(self._on_root_create, nodeClass="Root")
-        nuke.addOnScriptSave(self._on_script_save, nodeClass="Root")
-        nuke.addKnobChanged(self._on_root_knob_changed, nodeClass="Root")
+        # Write nodes are only ever created on demand (the "w" hotkey), but
+        # once one exists its render path should follow the script through
+        # version-ups and save-as: never render v002 into the v001 folder.
+        if self.__setting_enabled("follow_script_version"):
+            nuke.addOnScriptSave(self._on_script_save, nodeClass="Root")
+            nuke.addKnobChanged(self._on_root_knob_changed, nodeClass="Root")
 
     def remove_callbacks(self):
         """Removes callbacks on destroy"""
         nuke.removeOnScriptLoad(
             self.convert_placeholder_nodes, nodeClass="Root"
         )
-        nuke.removeOnScriptLoad(self._on_script_load, nodeClass="Root")
-        nuke.removeOnCreate(self._on_root_create, nodeClass="Root")
-        nuke.removeOnScriptSave(self._on_script_save, nodeClass="Root")
-        nuke.removeKnobChanged(self._on_root_knob_changed, nodeClass="Root")
+        for remove, callback in (
+            (nuke.removeOnScriptSave, self._on_script_save),
+            (nuke.removeKnobChanged, self._on_root_knob_changed),
+        ):
+            try:
+                remove(callback, nodeClass="Root")
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
-    # Autopilot
+    # On-demand write nodes
     #
-    # Write nodes that need no artist: they are created, wired, named,
-    # pointed at the right versioned path and colour managed by the
-    # pipeline, and they follow the script through every version-up and
-    # save-as. Nothing here ever moves, rewires or deletes a node that
-    # already exists - it only fills gaps and refreshes paths.
+    # Nothing here creates a node by itself - not on open, not on save.
+    # A write node appears when the artist asks for one ("w"), fully set
+    # up for this shot and project. After that it is an ordinary Write
+    # node the artist owns; the pipeline only keeps its render path on
+    # the current script version - and only while the path is still the
+    # one the pipeline wrote.
     # ------------------------------------------------------------------
 
     def __setting_enabled(self, name):
@@ -606,7 +694,7 @@ class NukeWriteNodeHandler(object):
 
     @contextlib.contextmanager
     def __quiet_undo(self):
-        """Autopilot edits must not end up on the artist's undo stack."""
+        """Background path updates must not end up on the undo stack."""
         disabled = False
         try:
             nuke.Undo.disable()
@@ -621,10 +709,6 @@ class NukeWriteNodeHandler(object):
                     nuke.Undo.enable()
                 except Exception:
                     pass
-
-    @staticmethod
-    def _is_sg_write(node):
-        return node.Class() == "Group" and node.knob("isShotGridWriteNode") is not None
 
     def _script_fields(self, script_path=None):
         """Fields of the script, or None if it is not a valid work file
@@ -658,133 +742,30 @@ class NukeWriteNodeHandler(object):
         return autopilot.pick_tail(
             nuke.allNodes(),
             plate_name=plate_name,
-            is_write=self._is_sg_write,
+            is_write=_is_sg_write,
             dependents=lambda node: node.dependent(both, False),
             dependencies=lambda node: node.dependencies(both),
         )
 
     def _existing_write_info(self):
         """[(category, output)] of the write nodes already in the script."""
-        info = []
-        for name in self.get_all_write_nodes():
-            node = nuke.toNode(name)
-            info.append((node["category"].value(), node["output"].value()))
-        return info
-
-    @staticmethod
-    def _get_provisioned():
-        root = nuke.root()
-        if autopilot.PROVISIONED_KNOB not in root.knobs():
-            return set()
-        return autopilot.parse_provisioned(root[autopilot.PROVISIONED_KNOB].value())
-
-    @staticmethod
-    def _set_provisioned(categories):
-        root = nuke.root()
-        if autopilot.PROVISIONED_KNOB not in root.knobs():
-            knob = nuke.String_Knob(autopilot.PROVISIONED_KNOB, "provisioned")
-            knob.setFlag(nuke.INVISIBLE)
-            root.addKnob(knob)
-        root[autopilot.PROVISIONED_KNOB].setValue(
-            autopilot.format_provisioned(categories)
-        )
-
-    def ensure_auto_write_nodes(self, script_path=None, reason=""):
-        """
-        Creates the write nodes listed in the auto_provision_categories
-        setting (main = the EXR, review = the MOV) if the script does not
-        have them yet, each one connected to the end of the comp.
-
-        Skipped entirely - silently - when auto_provision is off, when the
-        script is not a saved work file (there is no render path to give
-        the node yet; the pre-save hook calls this again with the target
-        path), or when the script is still empty (tk-nuke-template has yet
-        to build the comp). A category is provisioned once per script: the
-        hidden root knob remembers it, so a write node an artist deleted
-        on purpose is not resurrected on the next open.
-
-        Returns:
-            list: names of the nodes created
-        """
-        if not self.__setting_enabled("auto_provision"):
-            return []
-        if self._script_fields(script_path) is None:
-            return []
-        if not nuke.allNodes():
-            return []
-
-        wanted = self.app.get_setting("auto_provision_categories") or []
-        options = self.__get_write_node_options()
-        main_category = self.app.get_setting("main_category_name")
-        main_write_name = self.app.get_setting("main_write_name")
-
-        provisioned = self._get_provisioned()
-        existing = self._existing_write_info()
-        taken = set(output for _, output in existing)
-        have_categories = set(category for category, _ in existing)
-
-        created = []
-        with nuke.root():
-            tail = self._find_tail()
-            if tail is not None:
-                base_x, base_y = tail.xpos(), tail.ypos() + 90
-            else:
-                base_x = 0
-                base_y = max(n.ypos() for n in nuke.allNodes()) + 150
-
-            for category in wanted:
-                if category in provisioned:
-                    continue
-                if category in have_categories:
-                    # made by hand already: nothing to add, nothing to redo
-                    provisioned.add(category)
-                    continue
-                if not options.get(category):
-                    logger.debug(
-                        "tk-nuke-writenode: auto category '%s' is not "
-                        "configured, skipping" % category
-                    )
-                    continue
-
-                output = autopilot.next_output_name(
-                    category, taken, main_category, main_write_name
-                )
-                if output is None:
-                    continue
-
-                node = self.__create_write(
-                    options,
-                    category,
-                    output,
-                    options[category][0],
-                    input_node=tail,
-                    auto=True,
-                    xy=(base_x + 150 * len(created), base_y),
-                    script_path=script_path,
-                )
-                created.append(node.name())
-                taken.add(output)
-                provisioned.add(category)
-
-        if provisioned != self._get_provisioned():
-            self._set_provisioned(provisioned)
-
-        if created:
-            logger.info(
-                "tk-nuke-writenode: auto-created %s (%s)" % (created, reason)
-            )
-        return created
+        return [
+            (_sg_value(node, "category"), _sg_value(node, "output"))
+            for node in map(nuke.toNode, self.get_all_write_nodes())
+        ]
 
     def sync_all(self, script_path=None):
         """
-        Points every ShotGrid write node in the script at the render path
-        of the script's current version, and brings the parts that follow
-        the script (file type, colorspace, movie fps, DAG label) up to
-        date. Only touches a knob whose value actually differs.
+        Re-points every ShotGrid write node at the render path of the
+        script's current version. Only the path (and the version label)
+        moves: nothing the artist tuned on the node is touched, and a
+        path that was edited by hand is left exactly as it is.
 
         Returns:
-            int: number of write nodes synced
+            int: number of write nodes looked at
         """
+        if not self.__setting_enabled("follow_script_version"):
+            return 0
         if self._script_fields(script_path) is None:
             return 0
 
@@ -797,7 +778,6 @@ class NukeWriteNodeHandler(object):
                     script_path=script_path,
                     create_dirs=False,
                     quiet=True,
-                    full=False,
                 ):
                     synced += 1
             except Exception:
@@ -807,15 +787,14 @@ class NukeWriteNodeHandler(object):
                 )
         return synced
 
-    def run_autopilot(self, reason="", script_path=None):
-        """Provision + sync in one go. Never raises."""
+    def run_sync(self, reason="", script_path=None):
+        """sync_all() as a background job: quiet, never raises."""
         try:
             with self.__quiet_undo():
-                self.ensure_auto_write_nodes(script_path, reason)
                 self.sync_all(script_path)
         except Exception:
             logger.warning(
-                "tk-nuke-writenode: autopilot failed (%s)" % reason,
+                "tk-nuke-writenode: path sync failed (%s)" % reason,
                 exc_info=True,
             )
 
@@ -823,37 +802,26 @@ class NukeWriteNodeHandler(object):
         """Called by the workfiles2 scene-operation hook right before a
         save / save-as is written, with the path about to be saved to, so
         the file on disk already carries the right render paths."""
-        self.run_autopilot("before-save", script_path=script_path)
+        self.run_sync("before-save", script_path=script_path)
 
-    def schedule_autopilot(self, reason=""):
-        """Runs the autopilot once the current callback chain has finished.
+    def schedule_sync(self, reason=""):
+        """Runs run_sync() once the current callback chain has finished.
         GUI sessions only: a farm / headless render must never edit the
         script it was asked to render."""
         if not getattr(nuke, "GUI", False):
             return
         try:
-            nuke.executeDeferred(self.run_autopilot, (reason,))
+            nuke.executeDeferred(self.run_sync, (reason,))
         except Exception:
             logger.warning(
-                "tk-nuke-writenode: could not schedule autopilot",
+                "tk-nuke-writenode: could not schedule path sync",
                 exc_info=True,
             )
-
-    def _on_script_load(self):
-        self.schedule_autopilot("script-load")
-
-    def _on_root_create(self):
-        self.schedule_autopilot("new-script")
 
     def _on_script_save(self):
         if not getattr(nuke, "GUI", False):
             return
-        try:
-            self.sync_all()
-        except Exception:
-            logger.warning(
-                "tk-nuke-writenode: sync on save failed", exc_info=True
-            )
+        self.run_sync("script-save")
 
     def _on_root_knob_changed(self):
         # Save As / version-up changes the script's name, and with it the
@@ -861,18 +829,21 @@ class NukeWriteNodeHandler(object):
         try:
             knob = nuke.thisKnob()
             if knob is not None and knob.name() == "name":
-                self.schedule_autopilot("script-renamed")
+                self.schedule_sync("script-renamed")
         except Exception:
             pass
 
     def create_writenode_auto(self):
         """
         The "w" hotkey: creates the next write node immediately - no
-        dialog, no naming. Category is the configured default (falling
-        back to the first one with a free name), the name is the next
-        free one (prerender, prerender2, ...), and it is connected to the
-        selected node or, with nothing selected, the end of the comp.
-        The old dialog is still available as "custom...".
+        dialog, no naming - already set up for this shot and project:
+        preset, colorspace, file type and the versioned render path.
+
+        Category is the configured default (falling back to the first one
+        with a free name) and the name is the next free one, so pressing
+        w repeatedly gives main, prerender, prerender2, ... It is
+        connected to the selected node or, with nothing selected, the end
+        of the comp. The old dialog is still available as "custom...".
         """
         options = self.__get_write_node_options()
         if not options:
@@ -897,14 +868,17 @@ class NukeWriteNodeHandler(object):
             nuke.message("Every write node category is already in use.")
             return None
 
-        upstream = None
-        selected = [n for n in nuke.selectedNodes() if not self._is_sg_write(n)]
+        selected = [n for n in nuke.selectedNodes() if not _is_sg_write(n)]
         if len(selected) == 1 and selected[0].Class() != "Viewer":
             upstream = selected[0]
         else:
             upstream = self._find_tail()
 
-        xy = (upstream.xpos(), upstream.ypos() + 100) if upstream is not None else None
+        xy = (
+            (upstream.xpos(), upstream.ypos() + 100)
+            if upstream is not None
+            else None
+        )
 
         with nuke.root():
             return self.__create_write(
@@ -961,30 +935,18 @@ class NukeWriteNodeHandler(object):
 
     @staticmethod
     def get_all_write_nodes():
-        """Get all write nodes in list
+        """Get all ShotGrid write nodes in list
 
         Returns:
-            list: write nodes in current script
+            list: write node names in current script
         """
-
-        # Find all groups in script
-        all_nodes = nuke.allNodes("Group")
-
-        # Create list to add nodes to
-        write_nodes = []
-
-        # Iterate trough all group nodes
-        for node in all_nodes:
-            # In the write nodes, we have a special knob
-            # to help identify this group as a write node
-            # If the group has the node "isShotGridWriteNode" we
-            # know this is a ShotGrid write node
-            if node.knob("isShotGridWriteNode"):
-
-                # If it is a ShotGrid write node, add it to the list
-                write_nodes.append(node.name())
-
-        return write_nodes
+        # Plain Write nodes carry the isShotGridWriteNode tag knob (so do
+        # the sgWrite groups older scripts may still contain)
+        return [
+            node.name()
+            for node in nuke.allNodes()
+            if _is_sg_write(node)
+        ]
 
     @staticmethod
     def go_to_write_node(output_name):
@@ -992,22 +954,12 @@ class NukeWriteNodeHandler(object):
         the specified output_name
 
         Args:
-            output_name (_type_): _description_
+            output_name (str): output name of the node to go to
         """
-        # Filter all nodes to search for group
-        all_nodes = nuke.allNodes("Group")
-        for node in all_nodes:
-
-            # If write node has "isShotGridWriteNode" knob, it
-            # is indeed a ShotGrid writenode
-            if node["isShotGridWriteNode"]:
-
-                # If the node has the specified output_name, we
-                # know this is the node we are search for
-                if node["output"].value() == output_name:
-
-                    # Position DAG to position of node
-                    nuke.zoom(3, [node.xpos(), node.ypos()])
+        for node in nuke.allNodes():
+            if _is_sg_write(node) and _sg_value(node, "output") == output_name:
+                # Position DAG to position of node
+                nuke.zoom(3, [node.xpos(), node.ypos()])
 
     def get_node_render_template(self, node):
         """Get  render template used by the specified node
@@ -1107,14 +1059,9 @@ class NukeWriteNodeHandler(object):
         Returns:
             str: colorspace
         """
-        # Open node to get the write node values
-        with node:
-            write_node = nuke.toNode("Write1")
-
+        with _inner_write(node) as write_node:
             # Get colorspace knob value
-            colorspace = write_node["colorspace"].value()
-
-            return colorspace
+            return write_node["colorspace"].value()
 
     def __create_write(
         self,
@@ -1127,20 +1074,22 @@ class NukeWriteNodeHandler(object):
         xy=None,
         script_path=None,
     ):
-        """Create write node using specified settings
+        """Create a write node using the specified settings
+
+        The result is a plain Nuke Write node with an "NFA ShotGrid" tab
+        added - all of Write's own knobs stay in the artist's hands.
 
         Args:
             write_node_settings (dict): containing all parameters to setup node
             category (str): category user has chosen to setup node
             output_name (str): output name to render
-            data_type (str): datatype to use
+            data_type (str): datatype (preset) to use
             input_node (attribute, optional): node to connect the write to
-            auto (bool, optional): created by the autopilot rather than the
-                artist: no properties panel, nothing selected/connected by
-                accident, no popups and no render folders created yet
+            auto (bool, optional): created without a dialog: no properties
+                panel, nothing selected/connected by accident, no popups
             xy (tuple, optional): position (x, y) in the DAG
             script_path (str, optional): script path to derive the render
-                path from, if not the current one (i.e. a save-as target)
+                path from, if not the current one
 
         Returns:
             attribute: created write node
@@ -1151,87 +1100,73 @@ class NukeWriteNodeHandler(object):
             for selected in nuke.selectedNodes():
                 selected.setSelected(False)
 
-        # Create write node
-        created_write = nuke.createNode("sgWrite", inpanel=not auto)
+        created_write = nuke.createNode("Write", inpanel=not auto)
 
         if input_node is not None:
             created_write.setInput(0, input_node)
         if xy is not None:
             created_write.setXYpos(int(xy[0]), int(xy[1]))
 
-        # Name the node after what it renders: Write_main, Write_review...
-        try:
-            created_write.setName("Write_%s" % output_name)
-        except Exception:
-            logger.debug("Could not rename the new write node", exc_info=True)
+        self.__add_sg_knobs(
+            created_write, write_node_settings, category, output_name, data_type
+        )
 
-        # Set output knob value to use specified output_name
-        created_write["output"].setValue(output_name)
-
-        # Get all categories and add to knob
-        categories = []
-        for key, value in write_node_settings.items():
-            categories.append(key)
-
-        created_write["category"].setValues(categories)
-
-        # Set category user specified
-        created_write["category"].setValue(category)
-
-        # Get all datatypes from pipeline settings
-        data_types = write_node_settings.get(category)
-        created_write["dataType"].setValues(data_types)
-
-        # Set datatype knob to use datatype user specified
-        created_write["dataType"].setValue(data_type)
-
-        # Get the settings the node has to be set to
-        configuration = self.__get_node_settings(created_write)
-        created_write["tile_color"].setValue(configuration.get("tile_color"))
-
-        # Get internal node settings
-        settings = configuration.get("settings")
-
-        # Open to edit internal node
-        with created_write:
-            # Get node attribute
-            write_node = nuke.toNode("Write1")
-
-            # Set file type
-            write_node["file_type"].setValue(configuration.get("file_type"))
-
-            # Set all knob settings
-            for knob, setting in settings.items():
-
-                # channels: auto -> rgba if the input has alpha, else rgb
-                if knob == "channels" and setting == "auto":
-                    setting = autopilot.channels_for(
-                        self.__input_channels(created_write)
-                    )
-
-                try:
-                    write_node[knob].setValue(setting)
-
-                except Exception as e:
-                    logger.debug(
-                        "Could not apply %s to the knob %s, because %s"
-                        % (setting, knob, str(e))
-                    )
-
-        # Calculate and set the render path immediately, so the node
-        # shows where it will render as soon as it's created, instead
-        # of leaving the "file" knob blank until the first render.
-        # __prepare_write() also (re)applies the settings loop above.
-        # Auto-created nodes don't make their render folders yet - that
-        # happens when something actually renders.
+        # Preset settings + the render path, set immediately so the node
+        # shows where it will render the moment it exists. No folders are
+        # made yet: Nuke creates them when something renders.
         self.__prepare_write(
             created_write,
             script_path=script_path,
-            create_dirs=not auto,
+            create_dirs=False,
             quiet=auto,
+            mode="full",
         )
 
+        # Only now listen for preset changes, so none of the above can
+        # trigger it
+        created_write["knobChanged"].setValue(_KNOB_CHANGED_SCRIPT)
+
         return created_write
+
+    @staticmethod
+    def __add_sg_knobs(node, options, category, output_name, data_type):
+        """The "NFA ShotGrid" tab: what this write is (output, category,
+        preset) and the studio buttons (render, farm, read, apply)."""
+        node.addKnob(nuke.Tab_Knob("sg_tab", "NFA ShotGrid"))
+
+        node.addKnob(nuke.String_Knob(KNOB_OUTPUT, "output", output_name))
+        node.addKnob(
+            nuke.Enumeration_Knob(KNOB_CATEGORY, "category", list(options))
+        )
+        node[KNOB_CATEGORY].setValue(category)
+        node.addKnob(
+            nuke.Enumeration_Knob(
+                KNOB_DATA, "data", list(options.get(category) or [])
+            )
+        )
+        node[KNOB_DATA].setValue(data_type)
+
+        buttons = (
+            ("sg_render_local", "render", "render_local", True),
+            ("sg_render_farm", "render on farm", "render_farm", False),
+            ("sg_read", "create read from write", "read_from_write", True),
+            ("sg_apply", "apply studio settings", "apply_write_settings", False),
+        )
+        for name, label, method, new_line in buttons:
+            button = nuke.PyScript_Knob(name, label, _BUTTON_SCRIPT % method)
+            node.addKnob(button)
+            if not new_line:
+                try:
+                    node[name].clearFlag(nuke.STARTLINE)
+                except Exception:
+                    pass
+
+        # Hidden bookkeeping: the last path the pipeline set, and the tag
+        # that marks this Write as a ShotGrid write node
+        node.addKnob(nuke.String_Knob(KNOB_PATH, "path"))
+        node[KNOB_PATH].setFlag(nuke.INVISIBLE)
+        node.addKnob(nuke.Text_Knob(KNOB_TAG, ""))
+        node[KNOB_TAG].setFlag(nuke.INVISIBLE)
 
     @staticmethod
     def __input_channels(node):
@@ -1357,8 +1292,8 @@ class NukeWriteNodeHandler(object):
         """
 
         # Get required information to get settings
-        write_category = node["category"].value()
-        data_type = node["dataType"].value()
+        write_category = _sg_value(node, "category")
+        data_type = _sg_value(node, "data")
 
         categories = self.__get_categories()
         for category in categories:
@@ -1413,7 +1348,7 @@ class NukeWriteNodeHandler(object):
             )
             return None, None
 
-        output = node["output"].value()
+        output = _sg_value(node, "output")
         fields["SEQ"] = "FORMAT: %d"
         fields["output"] = output
 
@@ -1461,11 +1396,39 @@ class NukeWriteNodeHandler(object):
                 settings["mov64_fps"] = fps
         return settings
 
+    def __set_path(self, node, write_node, render_path, force=False):
+        """Puts render_path on the Write's file knob - unless the file was
+        edited by hand since the pipeline last set it."""
+        tracked = node.knob(KNOB_PATH)
+        current = write_node["file"].value()
+        if (
+            tracked is not None
+            and not force
+            and current
+            and current != tracked.value()
+        ):
+            return
+        self.__set_knob(write_node, "file", render_path)
+        if tracked is not None:
+            self.__set_knob(node, KNOB_PATH, render_path)
+
     def __prepare_write(
-        self, node, script_path=None, create_dirs=True, quiet=False, full=True
+        self,
+        node,
+        script_path=None,
+        create_dirs=True,
+        quiet=False,
+        mode="path",
     ):
-        """Set all parameters when rendering.
-        Will calculate paths and set them
+        """Bring a write node in line with the pipeline
+
+        mode "path" (rendering, saving, version-up): only the render path
+        - and only if it is still the one the pipeline wrote. Everything
+        else on the node is the artist's.
+
+        mode "full" (creation, picking another category / preset, the
+        "apply studio settings" button): the preset's settings too, and
+        the path unconditionally.
 
         Args:
             node (attribute): node to process
@@ -1473,14 +1436,12 @@ class NukeWriteNodeHandler(object):
                 path from instead of the current script
             create_dirs (bool, optional): create the render folder
             quiet (bool, optional): never pop a message up on failure
-            full (bool, optional): apply every configured knob. False only
-                touches the ones that follow the script (file type, path,
-                colorspace, movie fps), so a background sync can't
-                overwrite anything an artist tuned on the node.
+            mode (str, optional): "path" or "full"
 
         Returns:
             bool: returns True if processing is completed, False if failed
         """
+        full = mode == "full"
 
         # Get node settings for selected node
         configuration = self.__get_node_settings(node)
@@ -1504,33 +1465,35 @@ class NukeWriteNodeHandler(object):
                 )
             return False
 
-        settings = self.__effective_settings(configuration)
+        with _inner_write(node) as write_node:
+            if full:
+                self.__set_knob(
+                    write_node, "file_type", configuration.get("file_type")
+                )
+                for knob, setting in self.__effective_settings(
+                    configuration
+                ).items():
+                    # channels: auto -> rgba if the input has alpha, else rgb
+                    if knob == "channels" and setting == "auto":
+                        setting = autopilot.channels_for(
+                            self.__input_channels(node)
+                        )
+                    self.__set_knob(write_node, knob, setting)
 
-        # Now we have all the parameters necessary, lets set them
-        with node:
+                # Let Nuke itself (local render, F5, the farm) create the
+                # folder at render time
+                self.__set_knob(write_node, "create_directories", True)
 
-            write_node = nuke.toNode("Write1")
-            self.__set_knob(write_node, "file_type", configuration.get("file_type"))
-            for knob, setting in settings.items():
+            self.__set_path(node, write_node, render_path, force=full)
+            render_file = write_node["file"].value()
 
-                # Prevent to change the channels knob
-                if knob == "channels":
-                    continue
-                if not full and knob not in ("colorspace", "mov64_fps"):
-                    continue
-                self.__set_knob(write_node, knob, setting)
+        if full:
+            self.__set_knob(node, "tile_color", configuration.get("tile_color"))
+        self.__refresh_label(node, fields, force=full)
 
-            self.__set_knob(write_node, "file", render_path)
-
-            # Let Nuke itself (local render, F5, the farm) create the
-            # folder at render time
-            self.__set_knob(write_node, "create_directories", True)
-
-        self.__refresh_label(node, fields)
-
-        if create_dirs:
+        if create_dirs and render_file:
             # Make sure directory exists
-            render_directory = os.path.dirname(render_path)
+            render_directory = os.path.dirname(render_file)
 
             # If directory doesn't exist, create it
             if not os.path.isdir(render_directory):
@@ -1538,13 +1501,19 @@ class NukeWriteNodeHandler(object):
 
         return True
 
-    def __refresh_label(self, node, fields):
-        """Shows the version the node renders to on the DAG (label: v003)."""
+    def __refresh_label(self, node, fields, force=False):
+        """Shows what the node renders on the DAG ("main v003") - unless
+        the artist put a label of their own on it."""
         try:
             version = int(fields.get("version"))
         except (TypeError, ValueError, AttributeError):
             return
-        self.__set_knob(node, "label", "v%03d" % version)
+        knob = node.knob("label")
+        current = knob.value() if knob is not None else None
+        if force or not current or _LABEL_PATTERN.match(current):
+            self.__set_knob(
+                node, "label", "%s v%03d" % (_sg_value(node, "output"), version)
+            )
 
     def __increment_save(self):
         """Increment save the current script"""

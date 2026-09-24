@@ -64,20 +64,12 @@ configuration:
     description: "Name to use for the output of the Nuke script"
     default_value: main
 
-  # ---- Autopilot (MayurWorks fork) ----
+  # ---- MayurWorks fork ----
 
-  auto_provision:
+  follow_script_version:
     type: bool
-    description: "Create the write nodes listed in auto_provision_categories automatically, connected to the end of the comp, once the script is a saved work file - no artist action needed. Existing write nodes are never moved or rewired, and one an artist deletes is not recreated."
-    default_value: false
-
-  auto_provision_categories:
-    type: list
-    description: "Categories to auto-create, e.g. [main, review]. Each gets one write node using the category's first write node entry. Categories that are not configured are skipped."
-    allows_empty: True
-    values:
-      type: str
-    default_value: []
+    description: "Keep the render path of every ShotGrid write node on the current script version through version-ups and save-as. Only the file path moves, and only while it is still the path the pipeline wrote - a path edited by hand is left alone. Never creates a node."
+    default_value: true
 
   auto_read_after_render:
     type: bool

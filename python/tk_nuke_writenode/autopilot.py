@@ -1,10 +1,10 @@
 # Studio additions to tk-nuke-writenode (MayurWorks fork).
 #
-# Pure-python helpers for the write node "autopilot". Nothing in here
-# imports nuke or sgtk, so every decision the autopilot makes (which node
-# to hang a write off, what to call it, what has already been
-# provisioned...) is unit-testable outside of Nuke. handler.py owns all
-# the actual Nuke calls and only uses these helpers to decide things.
+# Pure-python helpers for on-demand write nodes. Nothing in here imports
+# nuke or sgtk, so every decision (which node to hang a write off, what to
+# call it, whether the input has alpha...) is unit-testable outside of
+# Nuke. handler.py owns all the actual Nuke calls and only uses these
+# helpers to decide things.
 
 import re
 
@@ -15,12 +15,6 @@ EXCLUDED_TAIL_CLASSES = frozenset(
 
 # Name of the studio template's write anchor (see StudioTemplate.nk).
 WRITE_ANCHOR_NAME = "writeNoOp"
-
-# Hidden, *saved* Root knob holding the categories that have already been
-# auto-provisioned in this script, e.g. "main,review". It is what lets an
-# artist delete an auto-created write node and have it stay deleted
-# instead of being recreated on every script open.
-PROVISIONED_KNOB = "sx_writenode_provisioned"
 
 
 def sanitize_output_name(name):
@@ -50,15 +44,6 @@ def next_output_name(category, taken, main_category="main", main_write_name="mai
     while "%s%d" % (base, counter) in taken:
         counter += 1
     return "%s%d" % (base, counter)
-
-
-def parse_provisioned(value):
-    """'main,review' -> {'main', 'review'}"""
-    return set(part.strip() for part in (value or "").split(",") if part.strip())
-
-
-def format_provisioned(categories):
-    return ",".join(sorted(categories))
 
 
 def channels_for(channel_names):

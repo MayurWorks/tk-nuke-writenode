@@ -36,8 +36,14 @@ class Knob(object):
     def setValues(self, values):
         self._values = list(values)
 
+    def values(self):
+        return list(getattr(self, "_values", []))
+
     def setFlag(self, flag):
         self.flags.add(flag)
+
+    def clearFlag(self, flag):
+        self.flags.discard(flag)
 
     def execute(self):
         self.sets += 1
@@ -118,6 +124,8 @@ class Node(object):
 
     # knobs
     def knob(self, name):
+        if name == "Render" and self._class == "Write":  # Write's render button
+            return self._knobs.setdefault(name, Knob(name))
         if name in LINKED_TO_WRITE1 and "Write1" in self.children:
             return self.children["Write1"]._knobs.setdefault(name, Knob(name))
         return self._knobs.get(name)
@@ -232,9 +240,23 @@ def install(monkeypatch, settings=None):
     nuke.allNodes = all_nodes
     nuke.createNode = create_node
     nuke.selectedNodes = lambda: [n for n in env.nodes if n.selected]
+    nuke.STARTLINE = 0x2
+    nuke.Tab_Knob = lambda name, label="": Knob(name)
     nuke.String_Knob = lambda name, label="", value="": Knob(name, value)
-    nuke.Text_Knob = lambda *a, **k: Knob()
-    nuke.Enumeration_Knob = lambda *a, **k: Knob()
+    nuke.Text_Knob = lambda name, label="", text="": Knob(name, text)
+
+    def enumeration_knob(name, label="", values=()):
+        knob = Knob(name, list(values)[0] if values else None)
+        knob.setValues(values)
+        return knob
+
+    def pyscript_knob(name, label="", command=""):
+        knob = Knob(name, None)
+        knob.command = command
+        return knob
+
+    nuke.Enumeration_Knob = enumeration_knob
+    nuke.PyScript_Knob = pyscript_knob
     nuke.message = lambda text: env.messages.append(text)
     nuke.thisKnob = lambda: env.this_knob
 
