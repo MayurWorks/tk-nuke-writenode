@@ -177,6 +177,37 @@ def _is_sg_write(node):
     return node.Class() in ("Write", "Group") and node.knob(KNOB_TAG) is not None
 
 
+def _closest_menu_item(knob, wanted):
+    """The entry of an enumeration knob that ``wanted`` refers to, or None.
+
+    The presets name menu entries the way the menu reads (colorspace "ACES -
+    ACEScg", codec "H.264"), but a menu may spell its entry slightly
+    differently ("H.264  avc1") and Nuke does not always complain when
+    setValue() gets a string that is not in the menu - it just stays put.
+    """
+    try:
+        items = [str(item) for item in knob.values()]
+    except Exception:
+        return None
+    wanted = str(wanted).lower()
+    for item in items:
+        if item.lower() == wanted:
+            return item
+    for item in items:
+        if wanted in item.lower():
+            return item
+    return None
+
+
+# What the "w" prompt offers: kind -> (label, a file type is one of these)
+KIND_IMAGE = "image"
+KIND_MOVIE = "movie"
+_KIND_LABELS = {
+    KIND_IMAGE: "EXR  (image sequence)",
+    KIND_MOVIE: "MOV  (review movie)",
+}
+
+
 @contextlib.contextmanager
 def _inner_write(node):
     """The Write that actually renders: the node itself, or the Write1
@@ -833,22 +864,103 @@ class NukeWriteNodeHandler(object):
         except Exception:
             pass
 
-    def create_writenode_auto(self):
-        """
-        The "w" hotkey: creates the next write node immediately - no
-        dialog, no naming - already set up for this shot and project:
-        preset, colorspace, file type and the versioned render path.
+    def __category_kinds(self):
+        """{category: KIND_IMAGE | KIND_MOVIE}, from each category's first
+        write node preset."""
+        kinds = {}
+        for category in self.__get_categories() or []:
+            write_nodes = category.get("write_nodes") or []
+            if write_nodes:
+                file_type = write_nodes[0].get("file_type")
+                kinds[category.get("category_name")] = (
+                    KIND_MOVIE if file_type in MOVIE_FILE_TYPES else KIND_IMAGE
+                )
+        return kinds
 
-        Category is the configured default (falling back to the first one
-        with a free name) and the name is the next free one, so pressing
-        w repeatedly gives main, prerender, prerender2, ... It is
-        connected to the selected node or, with nothing selected, the end
-        of the comp. The old dialog is still available as "custom...".
+    @staticmethod
+    def __ask_kind(kinds):
+        """The "w" prompt: EXR or MOV? Returns the kind, or None if the
+        artist cancelled."""
+        labels = [_KIND_LABELS[kind] for kind in kinds]
+        try:
+            index = nuke.choice(
+                "NFA ShotGrid Write Node",
+                "Which type of write node do you want?",
+                labels,
+                0,
+            )
+        except Exception:
+            return None
+        if index is None or index < 0 or index >= len(kinds):
+            return None
+        return kinds[index]
+
+    def create_writenode_auto(self, kind=None):
+        """
+        The "w" hotkey: asks which type of write node - EXR or MOV - then
+        creates it immediately, already set up for this shot and project:
+        preset, colorspace, file type and the versioned render path. No
+        naming, no further dialog.
+
+        EXR: the configured default category (falling back to the first
+        one with a free name) and the next free name, so pressing w
+        repeatedly gives main, prerender, prerender2, ...
+        MOV: the review category. The movie's file name has no per-node
+        part (STRM_E1_0070_cmp_OS_v003.mov), so there is one per script
+        version: if one exists already it is selected instead of
+        creating a second that would overwrite it.
+
+        It is connected to the selected node or, with nothing selected,
+        the end of the comp. The old dialog is still available as
+        "custom...".
+
+        Args:
+            kind (str, optional): KIND_IMAGE or KIND_MOVIE to skip the
+                prompt
+
+        Returns:
+            attribute: the new (or, for a second MOV, the existing) node
         """
         options = self.__get_write_node_options()
         if not options:
             nuke.message("No write node categories are configured.")
             return None
+
+        category_kinds = self.__category_kinds()
+        available = [
+            k for k in (KIND_IMAGE, KIND_MOVIE) if k in category_kinds.values()
+        ]
+        if not available:
+            nuke.message("No write node categories are configured.")
+            return None
+        if kind is None:
+            kind = available[0] if len(available) == 1 else self.__ask_kind(available)
+            if kind is None:
+                return None  # cancelled
+        # the node keeps every category in its dropdown (so an EXR node can
+        # still be switched to review), but a new one is picked from this kind
+        all_options = options
+        options = dict(
+            (c, presets) for c, presets in all_options.items() if category_kinds.get(c) == kind
+        )
+        if not options:
+            nuke.message("No %s write node is configured." % _KIND_LABELS[kind])
+            return None
+
+        if kind == KIND_MOVIE:
+            for name in self.get_all_write_nodes():
+                existing = nuke.toNode(name)
+                if category_kinds.get(_sg_value(existing, "category")) == KIND_MOVIE:
+                    nuke.message(
+                        "This script already has a MOV write node (%s): its "
+                        "file name is per version, a second one would "
+                        "overwrite it." % existing.name()
+                    )
+                    for node in nuke.selectedNodes():
+                        node.setSelected(False)
+                    existing.setSelected(True)
+                    self.go_to_write_node(_sg_value(existing, "output"))
+                    return existing
 
         main_category = self.app.get_setting("main_category_name")
         main_write_name = self.app.get_setting("main_write_name")
@@ -882,7 +994,7 @@ class NukeWriteNodeHandler(object):
 
         with nuke.root():
             return self.__create_write(
-                options,
+                all_options,
                 category,
                 output,
                 options[category][0],
@@ -1358,6 +1470,12 @@ class NukeWriteNodeHandler(object):
         # natural value: it is what tells two write nodes apart.
         fields.setdefault("name", output)
 
+        # Some file names want the step in lower case (..._cmp_OS_v003.mov)
+        # while its folder keeps the shotgrid short name (CMP): templates
+        # get both, Step and step_lower.
+        if fields.get("Step"):
+            fields.setdefault("step_lower", str(fields["Step"]).lower())
+
         # Calculate path
         render_path = render_template.apply_fields(fields).replace(os.sep, "/")
 
@@ -1370,17 +1488,35 @@ class NukeWriteNodeHandler(object):
     @staticmethod
     def __set_knob(target, name, value):
         """setValue() only when the value differs, and never raises. Keeps a
-        no-op sync from dirtying the script."""
+        no-op sync from dirtying the script. A setting that ends up not
+        applied is logged as a warning (Toolkit log), not swallowed."""
         if value is None:
             return
         try:
             knob = target[name]
-            if str(knob.value()) != str(value):
+            if str(knob.value()) == str(value):
+                return
+            try:
                 knob.setValue(value)
+            except Exception:
+                pass
+
+            # A menu entry spelled differently from the preset
+            if isinstance(value, str) and str(knob.value()) != value:
+                match = _closest_menu_item(knob, value)
+                if match is not None and match != str(knob.value()):
+                    knob.setValue(match)
+
+            if isinstance(value, str) and str(knob.value()) != value:
+                if _closest_menu_item(knob, value) != str(knob.value()):
+                    logger.warning(
+                        "tk-nuke-writenode: could not apply '%s' to the knob "
+                        "%s (it is '%s')" % (value, name, knob.value())
+                    )
         except Exception as error:
-            logger.debug(
-                "Could not apply %s to the knob %s, because %s"
-                % (value, name, str(error))
+            logger.warning(
+                "tk-nuke-writenode: could not apply %s to the knob %s, "
+                "because %s" % (value, name, str(error))
             )
 
     def __effective_settings(self, configuration):

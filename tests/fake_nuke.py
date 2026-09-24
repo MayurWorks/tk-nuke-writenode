@@ -170,6 +170,8 @@ class Env(object):
         self.root = RootNode(self)
         self.selection_order = []
         self.messages = []
+        self.choices = []  # every nuke.choice() prompt shown (its options)
+        self.choice_answer = 0  # index the artist picks (-1 = cancel)
         self.callbacks = []
         self.deferred = []
         self.this_knob = None
@@ -258,6 +260,13 @@ def install(monkeypatch, settings=None):
     nuke.Enumeration_Knob = enumeration_knob
     nuke.PyScript_Knob = pyscript_knob
     nuke.message = lambda text: env.messages.append(text)
+
+    def choice(title, prompt, options, default=0):
+        env.choices.append(list(options))
+        return env.choice_answer
+
+    nuke.choice = choice
+    nuke.zoom = lambda *a, **k: None
     nuke.thisKnob = lambda: env.this_knob
 
     def execute_deferred(call, args=(), kwargs=None):
@@ -384,10 +393,10 @@ TEMPLATES = {
         "Publish/{Sequence}/{Shot}/{Step}/Nuke/{Step}/renders/{name}/{output}/v{version}/{Shot}_{Step}_{name}_{output}_v{version}.{SEQ}.exr"
     ),
     "nuke_shot_write_movie": FakeTemplate(
-        SHOT_ROOT + "/Nuke/{Step}/previews/{Shot}_{Step}_{name}_v{version}.{SEQ}.mov"
+        SHOT_ROOT + "/Nuke/{Step}/previews/{Shot}_{step_lower}_OS_v{version}.mov"
     ),
     "nuke_shot_write_movie_pub": FakeTemplate(
-        "Publish/{Sequence}/{Shot}/{Step}/Nuke/{Step}/previews/{Shot}_{Step}_{name}_v{version}.{SEQ}.mov"
+        "Publish/{Sequence}/{Shot}/{Step}/Nuke/{Step}/previews/{Shot}_{step_lower}_OS_v{version}.mov"
     ),
 }
 

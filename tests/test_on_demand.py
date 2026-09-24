@@ -280,7 +280,7 @@ class TestPickingAnotherPreset(object):
         assert node["colorspace"].value() == "Output - Rec.709"
         assert node["file"].value() == (
             "/jobs/SlateX/Artists/EP_1/STRM_E1_0070/Comp/Nuke/Comp/previews/"
-            "STRM_E1_0070_Comp_main_v001.%04d.mov"
+            "STRM_E1_0070_comp_OS_v001.mov"
         )
 
     def test_review_mov_runs_at_the_script_fps(self, world):
@@ -413,3 +413,113 @@ class TestAutoRead(object):
         handler.knob_changed(node, node["sg_category"])
         handler.render_local(node)
         assert [n for n in env.nodes if n.name().startswith("render_")] == []
+
+
+class TestWhichTypeOfWrite(object):
+    """w asks first: EXR or MOV."""
+
+    def test_w_asks_exr_or_mov_and_exr_is_the_first_choice(self, world):
+        node = world.handler.create_writenode_auto()
+        assert world.env.choices == [["EXR  (image sequence)", "MOV  (review movie)"]]
+        assert node["sg_category"].value() == "main"
+        assert node["file_type"].value() == "exr"
+
+    def test_mov_makes_the_review_write_named_the_openslate_way(self, world):
+        world.env.choice_answer = 1
+        node = world.handler.create_writenode_auto()
+        assert node["sg_category"].value() == "review"
+        assert node["sg_output"].value() == "review"
+        assert node["file_type"].value() == "mov"
+        assert node["colorspace"].value() == "Output - Rec.709"
+        assert node["file"].value() == (
+            "/jobs/SlateX/Artists/EP_1/STRM_E1_0070/Comp/Nuke/Comp/previews/"
+            "STRM_E1_0070_comp_OS_v001.mov"
+        )
+        assert node["label"].value() == "review v001"
+        assert node.input(0) is world.blur
+        # the dropdown still offers every category
+        assert node["sg_category"].values() == ["main", "prerender", "review"]
+
+    def test_mov_follows_the_script_version_and_fps(self, world):
+        world.env.root["fps"].setValue(25.0)
+        world.env.choice_answer = 1
+        node = world.handler.create_writenode_auto()
+        assert node["mov64_fps"].value() == 25.0
+        world.env.root.script_path = script_path(3)
+        world.handler.sync_all()
+        assert node["file"].value().endswith("STRM_E1_0070_comp_OS_v003.mov")
+
+    def test_exr_after_a_mov_still_gets_main_then_prerender(self, world):
+        world.env.choice_answer = 1
+        world.handler.create_writenode_auto()
+        world.env.choice_answer = 0
+        outputs = [world.handler.create_writenode_auto()["sg_output"].value() for _ in range(3)]
+        assert outputs == ["main", "prerender", "prerender2"]
+
+    def test_cancelling_the_prompt_creates_nothing(self, world):
+        before = list(world.env.nodes)
+        world.env.choice_answer = -1
+        assert world.handler.create_writenode_auto() is None
+        assert world.env.nodes == before
+        assert world.env.messages == []
+
+    def test_a_second_mov_selects_the_existing_one_instead(self, world):
+        world.env.choice_answer = 1
+        first = world.handler.create_writenode_auto()
+        count = len(world.env.nodes)
+        again = world.handler.create_writenode_auto()
+        assert again is first
+        assert len(world.env.nodes) == count
+        assert first.selected
+        assert "already has a MOV write node" in world.env.messages[-1]
+
+    def test_kind_argument_skips_the_prompt(self, world):
+        node = world.handler.create_writenode_auto(kind="movie")
+        assert node["file_type"].value() == "mov"
+        assert world.env.choices == []
+
+    def test_no_prompt_when_only_one_kind_is_configured(self, world):
+        world.app._settings["categories"] = [
+            c for c in fake_nuke.CATEGORIES if c["category_name"] != "review"
+        ]
+        node = world.handler.create_writenode_auto()
+        assert world.env.choices == []
+        assert node["file_type"].value() == "exr"
+
+
+class PickyMenu(object):
+    """An Enumeration knob like Nuke's mov64_codec: setValue() with a
+    string that is not exactly a menu entry silently does nothing."""
+
+    def __init__(self, value, items):
+        self._value, self._items = value, items
+
+    def value(self):
+        return self._value
+
+    def values(self):
+        return list(self._items)
+
+    def setValue(self, value):
+        if value in self._items:
+            self._value = value
+
+
+class TestMenuNamesThatDontMatchExactly(object):
+    def _set(self, world, knob, value):
+        world.handler._NukeWriteNodeHandler__set_knob({"k": knob}, "k", value)
+
+    def test_codec_label_is_matched_to_the_menu_entry(self, world):
+        codec = PickyMenu("Apple ProRes  appr", ["Apple ProRes  appr", "H.264  avc1"])
+        self._set(world, codec, "H.264")
+        assert codec.value() == "H.264  avc1"
+
+    def test_exact_entries_and_case_differences(self, world):
+        menu = PickyMenu("a", ["a", "ACES - ACEScg"])
+        self._set(world, menu, "aces - acescg")
+        assert menu.value() == "ACES - ACEScg"
+
+    def test_an_unknown_entry_is_left_alone_and_does_not_raise(self, world):
+        menu = PickyMenu("a", ["a", "b"])
+        self._set(world, menu, "zzz")
+        assert menu.value() == "a"

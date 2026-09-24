@@ -77,7 +77,7 @@ def test_on_demand_write_resolves_real_paths(monkeypatch, templates):
     node["sg_category"].setValue("review")
     handler.knob_changed(node, node["sg_category"])
     assert node["file"].value() == (
-        root + "/previews/STRM_E1_0070_Comp_main_v003.%04d.mov"
+        root + "/previews/STRM_E1_0070_comp_OS_v003.mov"
     )
 
     # version-up follows
