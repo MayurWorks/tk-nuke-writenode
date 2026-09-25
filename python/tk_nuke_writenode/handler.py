@@ -240,6 +240,21 @@ def _closest_menu_item(knob, wanted):
     return None
 
 
+def _codec_code(menu_item):
+    """The short code Nuke's mov64_codec knob actually needs (e.g.
+    "appr", "apch", "AVdn"): the last whitespace-separated token of a
+    menu entry like "Apple ProRes 422 HQ  apch". This is what a .nk
+    script stores for the knob, and it is also the only form Nuke
+    reliably accepts. Foundry bug ID 368676 ("Setting codec by 'Dropdown
+    Name' causes incorrect behaviour depending on codec"): calling
+    setValue() with the full display text - even an exact, correctly
+    spelled menu entry - can silently land the knob on a different
+    codec (Avid DNxHD in practice) instead of the one requested.
+    """
+    parts = str(menu_item).split()
+    return parts[-1] if parts else str(menu_item)
+
+
 # What the "w" prompt offers: kind -> (label, a file type is one of these)
 KIND_IMAGE = "image"
 KIND_MOVIE = "movie"
@@ -1530,13 +1545,35 @@ class NukeWriteNodeHandler(object):
     def __set_knob(target, name, value):
         """setValue() only when the value differs, and never raises. Keeps a
         no-op sync from dirtying the script. A setting that ends up not
-        applied is logged as a warning (Toolkit log), not swallowed."""
+        applied is logged as a warning (Toolkit log), not swallowed.
+
+        mov64_codec is special-cased to always be set by its short code
+        (see _codec_code) rather than the matched entry's full display
+        text, because the full text does not reliably apply - see
+        _codec_code's docstring (Foundry bug ID 368676).
+        """
         if value is None:
             return
         try:
             knob = target[name]
             if str(knob.value()) == str(value):
                 return
+
+            if name == "mov64_codec" and isinstance(value, str):
+                match = _closest_menu_item(knob, value)
+                code = _codec_code(match) if match is not None else value
+                try:
+                    knob.setValue(code)
+                except Exception:
+                    pass
+                if str(knob.value()) != code:
+                    logger.warning(
+                        "tk-nuke-writenode: could not apply codec '%s' "
+                        "(%s) to the knob %s (it is '%s')"
+                        % (value, code, name, knob.value())
+                    )
+                return
+
             try:
                 knob.setValue(value)
             except Exception:

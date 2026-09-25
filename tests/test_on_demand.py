@@ -578,3 +578,76 @@ class TestMenuNamesThatDontMatchExactly(object):
         )
         self._set(world, menu, "apch")
         assert menu.value() == "Apple ProRes 422 HQ  apch"
+
+
+class RealisticCodecMenu(object):
+    """Models Nuke's real mov64_codec knob: only the bare short code (a
+    menu entry's last token, e.g. "appr") reliably applies. Foundry bug
+    ID 368676 means setValue() with the full display text is not
+    trustworthy - it can silently resolve to a different codec (Avid
+    DNxHD in practice) - so that path is deliberately not simulated as
+    "working"; a fix must never depend on it."""
+
+    def __init__(self, value, items):
+        self._value, self._items = value, items
+
+    def value(self):
+        return self._value
+
+    def values(self):
+        return list(self._items)
+
+    def setValue(self, value):
+        if value in [item.split()[-1] for item in self._items]:
+            self._value = value
+
+
+class TestMov64CodecUsesTheShortCode(object):
+    def test_mov64_codec_is_applied_by_short_code_not_display_text(self, world):
+        """__set_knob must resolve "Apple ProRes 422 HQ" against the real
+        menu and then apply it by short code ("appr"), not by the matched
+        entry's full display text - see RealisticCodecMenu and
+        _codec_code's docstring."""
+        codec = RealisticCodecMenu(
+            "AVdn", ["Apple ProRes 422 HQ  appr", "Avid DNxHD  AVdn"]
+        )
+        world.handler._NukeWriteNodeHandler__set_knob(
+            {"mov64_codec": codec}, "mov64_codec", "Apple ProRes 422 HQ"
+        )
+        assert codec.value() == "appr"
+
+    def test_a_bare_short_code_setting_still_works(self, world):
+        """The movie_codec app setting configured directly as a short
+        code ("appr") must also resolve, via _closest_menu_item's
+        four-character-code match."""
+        codec = RealisticCodecMenu(
+            "AVdn", ["Apple ProRes 422 HQ  appr", "Avid DNxHD  AVdn"]
+        )
+        world.handler._NukeWriteNodeHandler__set_knob(
+            {"mov64_codec": codec}, "mov64_codec", "appr"
+        )
+        assert codec.value() == "appr"
+
+    def test_no_menu_match_falls_back_to_the_raw_value(self, world):
+        """No usable .values() (e.g. a knob type that does not expose a
+        real menu) - fall back to setting the raw value rather than
+        raising or silently doing nothing."""
+
+        class PermissiveKnob(object):
+            def __init__(self, value):
+                self._value = value
+
+            def value(self):
+                return self._value
+
+            def values(self):
+                return []
+
+            def setValue(self, value):
+                self._value = value
+
+        codec = PermissiveKnob("AVdn")
+        world.handler._NukeWriteNodeHandler__set_knob(
+            {"mov64_codec": codec}, "mov64_codec", "appr"
+        )
+        assert codec.value() == "appr"
