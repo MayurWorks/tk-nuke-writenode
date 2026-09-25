@@ -296,7 +296,7 @@ class TestPickingAnotherPreset(object):
         and the H.264-only quality knob must not end up on the node."""
         node = world.handler.create_writenode_auto()
         switch(world, node, "sg_category", "review")
-        assert node["mov64_codec"].value() == "Apple ProRes 422 HQ"
+        assert node["mov64_codec"].value() == "appr"
         assert "mov64_quality_max" not in node.knobs()
 
     def test_review_mov_codec_falls_back_when_app_setting_is_absent(self, world):

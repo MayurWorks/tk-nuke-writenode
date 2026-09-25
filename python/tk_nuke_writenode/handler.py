@@ -115,7 +115,19 @@ MOVIE_FILE_TYPES = ("mov", "mov64", "mp4", "ffmpeg")
 # viewable, so H.264 is no longer what a "review" preset gets. Set the app's
 # movie_codec setting to change it; that one setting decides, like the fps
 # does, so a preset that still says mov64_codec: H.264 cannot bring it back.
-DEFAULT_MOVIE_CODEC = "Apple ProRes 422 HQ"
+#
+# This is the raw mov64_codec code ("appr"), not the menu's display name
+# ("Apple ProRes 422 HQ"). __set_knob resolves a display name against the
+# live menu when it can (see _closest_menu_item/_codec_code), but that
+# match is not guaranteed - menu wording differs across Nuke versions/
+# platforms - and when it fails the display name would otherwise get
+# passed straight to setValue(), which silently lands on a different
+# codec (Avid DNxHD in practice; Foundry bug ID 368676). Using the raw
+# code here removes that dependency entirely: it applies byte-for-byte,
+# match or no match. To get the raw code for a different codec: in Nuke,
+# create a mov Write node, pick that codec from the dropdown, and read
+# the mov64_codec value off the node (Node Graph "!" / copy-paste text).
+DEFAULT_MOVIE_CODEC = "appr"
 
 # Knobs of Nuke's mov writer that only the H.264 encoder reads. A preset that
 # still carries them is not wrong, but they mean nothing to ProRes.

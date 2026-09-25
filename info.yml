@@ -78,8 +78,8 @@ configuration:
 
   movie_codec:
     type: str
-    description: "Codec every review/MOV write node uses (Nuke's mov64_codec menu entry, e.g. 'Apple ProRes 422 HQ'). Applied to every movie write regardless of what a category preset's settings.mov64_codec says - see DEFAULT_MOVIE_CODEC in handler.py. H.264 movies were not reliably viewable outside Nuke, which is why this exists instead of leaving codec to each preset."
-    default_value: "Apple ProRes 422 HQ"
+    description: "Codec every review/MOV write node uses - Nuke's raw mov64_codec value (e.g. 'appr' for Apple ProRes 422 HQ), NOT the dropdown display name: setting this knob by display name is unreliable and can silently apply a different codec (Foundry bug ID 368676). To find the raw value for a codec: create a mov Write node in Nuke, pick that codec from the dropdown, and read mov64_codec off the node's text (copy/paste or '!' in the Node Graph). Applied to every movie write regardless of what a category preset's settings.mov64_codec says - see DEFAULT_MOVIE_CODEC in handler.py. H.264 movies were not reliably viewable outside Nuke, which is why this exists instead of leaving codec to each preset."
+    default_value: "appr"
 
 
 # this tk_nuke_writenode works in all engines - it does not contain

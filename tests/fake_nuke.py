@@ -486,7 +486,7 @@ class FakeApp(object):
             "auto_provision": True,
             "auto_provision_categories": ["main", "review"],
             "auto_read_after_render": False,
-            "movie_codec": "Apple ProRes 422 HQ",
+            "movie_codec": "appr",
         }
         self._settings.update(settings or {})
         self._templates = {
