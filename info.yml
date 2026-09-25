@@ -76,6 +76,11 @@ configuration:
     description: "After a local render of an image sequence, create - or update - a Read node named render_<output> next to the write node."
     default_value: false
 
+  movie_codec:
+    type: str
+    description: "Codec every review/MOV write node uses (Nuke's mov64_codec menu entry, e.g. 'Apple ProRes 422 HQ'). Applied to every movie write regardless of what a category preset's settings.mov64_codec says - see DEFAULT_MOVIE_CODEC in handler.py. H.264 movies were not reliably viewable outside Nuke, which is why this exists instead of leaving codec to each preset."
+    default_value: "Apple ProRes 422 HQ"
+
 
 # this tk_nuke_writenode works in all engines - it does not contain
 # any host application specific commands

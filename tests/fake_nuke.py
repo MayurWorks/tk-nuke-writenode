@@ -441,7 +441,12 @@ CATEGORIES = [
         "category_name": "review",
         "write_nodes": [
             {
-                "name": "mov (h264)",
+                # A deployed-but-not-yet-updated preset: still carries the old
+                # mov64_codec/mov64_quality_max H.264 values on purpose, so
+                # tests can confirm __effective_settings overrides them
+                # rather than only covering the case where a preset already
+                # agrees with the studio codec.
+                "name": "mov (review)",
                 "file_type": "mov",
                 "render_template": "nuke_shot_write_movie",
                 "publish_template": "nuke_shot_write_movie_pub",
@@ -449,6 +454,7 @@ CATEGORIES = [
                 "settings": {
                     "colorspace": "Output - Rec.709",
                     "mov64_codec": "H.264",
+                    "mov64_quality_max": 3,
                     "mov64_fps": 24,
                 },
             }
@@ -480,6 +486,7 @@ class FakeApp(object):
             "auto_provision": True,
             "auto_provision_categories": ["main", "review"],
             "auto_read_after_render": False,
+            "movie_codec": "Apple ProRes 422 HQ",
         }
         self._settings.update(settings or {})
         self._templates = {

@@ -110,6 +110,23 @@ PER_PROJECT_WRITE_CATEGORIES = {
 # File types written as a single movie rather than an image sequence.
 MOVIE_FILE_TYPES = ("mov", "mov64", "mp4", "ffmpeg")
 
+# The codec of every review movie. Studio decision: Apple ProRes (422 HQ is the
+# usual dailies profile). The H.264 mov Nuke wrote here before was not reliably
+# viewable, so H.264 is no longer what a "review" preset gets. Set the app's
+# movie_codec setting to change it; that one setting decides, like the fps
+# does, so a preset that still says mov64_codec: H.264 cannot bring it back.
+DEFAULT_MOVIE_CODEC = "Apple ProRes 422 HQ"
+
+# Knobs of Nuke's mov writer that only the H.264 encoder reads. A preset that
+# still carries them is not wrong, but they mean nothing to ProRes.
+H264_ONLY_KNOBS = (
+    "mov64_quality_max",
+    "mov64_bitrate",
+    "mov64_bitrate_tolerance",
+    "mov64_gop_size",
+    "mov64_b_frames",
+)
+
 # Review (movie) colorspace per sg_color_pipeline value. PER_PROJECT_WRITE_
 # CATEGORIES only carries the image (exr) write nodes, so without this a
 # project on the nuke-default OCIO config would keep asking for the ACES
@@ -177,25 +194,49 @@ def _is_sg_write(node):
     return node.Class() in ("Write", "Group") and node.knob(KNOB_TAG) is not None
 
 
+def _menu_text(text):
+    """Lower case, single spaces: Nuke pads codec entries with two spaces
+    before the four-character code ("H.264  avc1")."""
+    return " ".join(str(text).lower().split())
+
+
+def _is_h264(codec):
+    text = _menu_text(codec)
+    return "h.264" in text or "h264" in text or "avc1" in text
+
+
 def _closest_menu_item(knob, wanted):
     """The entry of an enumeration knob that ``wanted`` refers to, or None.
 
     The presets name menu entries the way the menu reads (colorspace "ACES -
-    ACEScg", codec "H.264"), but a menu may spell its entry slightly
-    differently ("H.264  avc1") and Nuke does not always complain when
-    setValue() gets a string that is not in the menu - it just stays put.
+    ACEScg", codec "Apple ProRes 422 HQ"), but a menu spells its entries
+    slightly differently ("Apple ProRes 422 HQ 10-bit  apch") and Nuke does
+    not always complain when setValue() gets a string that is not in the
+    menu - it just stays put.
+
+    In order: the same text; the entry's four-character codec code ("apch");
+    the shortest entry that contains the text. Shortest matters for ProRes:
+    "Apple ProRes 422" is a prefix of the 422 HQ, LT and Proxy entries too, and
+    must select plain 422, not whichever of them comes first in the menu.
     """
     try:
         items = [str(item) for item in knob.values()]
     except Exception:
         return None
-    wanted = str(wanted).lower()
+    wanted = _menu_text(wanted)
+    if not wanted:
+        return None
     for item in items:
-        if item.lower() == wanted:
+        if _menu_text(item) == wanted:
             return item
-    for item in items:
-        if wanted in item.lower():
-            return item
+    if " " not in wanted and len(wanted) == 4:
+        for item in items:
+            words = _menu_text(item).split()
+            if words and words[-1] == wanted:
+                return item
+    containing = [item for item in items if wanted in _menu_text(item)]
+    if containing:
+        return min(containing, key=lambda item: len(_menu_text(item)))
     return None
 
 
@@ -1519,9 +1560,30 @@ class NukeWriteNodeHandler(object):
                 "because %s" % (value, name, str(error))
             )
 
+    def __get_movie_codec(self):
+        """The app's "movie_codec" setting, or DEFAULT_MOVIE_CODEC if unset
+        (older configs deployed before this setting existed)."""
+        try:
+            return self.app.get_setting("movie_codec") or DEFAULT_MOVIE_CODEC
+        except Exception:
+            return DEFAULT_MOVIE_CODEC
+
     def __effective_settings(self, configuration):
         """The configured write settings plus what is derived live: a movie
-        always runs at the script's fps, not a number typed into YAML."""
+        always runs at the script's fps, not a number typed into YAML, and
+        always gets the studio's movie codec, not whatever a preset's
+        mov64_codec happens to say.
+
+        The studio was getting unplayable review movies because presets
+        (this app's own defaults included) set mov64_codec to H.264, and
+        Nuke's H.264 mov writer is not reliably viewable outside Nuke. Every
+        movie write now gets DEFAULT_MOVIE_CODEC (Apple ProRes 422 HQ)
+        regardless of what a category's YAML says, the same way fps already
+        overrides a typed-in number - one setting decides, so a preset
+        cannot bring H.264 back by omission. mov64_quality_max and the other
+        H264_ONLY_KNOBS are dropped from an inherited preset since they mean
+        nothing to ProRes and would otherwise sit on the node unexplained.
+        """
         settings = dict(configuration.get("settings") or {})
         if configuration.get("file_type") in MOVIE_FILE_TYPES:
             try:
@@ -1530,6 +1592,10 @@ class NukeWriteNodeHandler(object):
                 fps = None
             if fps:
                 settings["mov64_fps"] = fps
+
+            for knob in H264_ONLY_KNOBS:
+                settings.pop(knob, None)
+            settings["mov64_codec"] = self.__get_movie_codec()
         return settings
 
     def __set_path(self, node, write_node, render_path, force=False):
@@ -1615,6 +1681,21 @@ class NukeWriteNodeHandler(object):
                             self.__input_channels(node)
                         )
                     self.__set_knob(write_node, knob, setting)
+
+                if configuration.get("file_type") in MOVIE_FILE_TYPES:
+                    codec_knob = write_node.knob("mov64_codec")
+                    if codec_knob is not None and _is_h264(codec_knob.value()):
+                        logger.warning(
+                            "tk-nuke-writenode: %s ended up on an H.264 codec "
+                            "('%s') - '%s' was requested but this Nuke's mov "
+                            "writer has no matching menu entry. Check the "
+                            "movie_codec app setting against this Nuke "
+                            "version's mov64_codec menu." % (
+                                write_node["name"].value(),
+                                codec_knob.value(),
+                                self.__get_movie_codec(),
+                            )
+                        )
 
                 # Let Nuke itself (local render, F5, the farm) create the
                 # folder at render time

@@ -274,8 +274,8 @@ class TestPickingAnotherPreset(object):
     def test_switching_to_review_swaps_presets_type_colorspace_and_path(self, world):
         node = world.handler.create_writenode_auto()
         switch(world, node, "sg_category", "review")
-        assert node["sg_data"].values() == ["mov (h264)"]
-        assert node["sg_data"].value() == "mov (h264)"
+        assert node["sg_data"].values() == ["mov (review)"]
+        assert node["sg_data"].value() == "mov (review)"
         assert node["file_type"].value() == "mov"
         assert node["colorspace"].value() == "Output - Rec.709"
         assert node["file"].value() == (
@@ -288,6 +288,25 @@ class TestPickingAnotherPreset(object):
         node = world.handler.create_writenode_auto()
         switch(world, node, "sg_category", "review")
         assert node["mov64_fps"].value() == 25.0
+
+    def test_review_mov_gets_the_studio_codec_not_the_presets(self, world):
+        """CATEGORIES' "review" preset still says mov64_codec: H.264 and
+        mov64_quality_max: 3 (a not-yet-updated preset) - the app's
+        movie_codec setting (Apple ProRes 422 HQ in this fixture) must win,
+        and the H.264-only quality knob must not end up on the node."""
+        node = world.handler.create_writenode_auto()
+        switch(world, node, "sg_category", "review")
+        assert node["mov64_codec"].value() == "Apple ProRes 422 HQ"
+        assert "mov64_quality_max" not in node.knobs()
+
+    def test_review_mov_codec_falls_back_when_app_setting_is_absent(self, world):
+        """An app deployed before movie_codec existed (get_setting raises for
+        an unknown setting name) still gets ProRes, not whatever a stale
+        preset says - DEFAULT_MOVIE_CODEC, not silence or a KeyError."""
+        del world.app._settings["movie_codec"]
+        node = world.handler.create_writenode_auto()
+        switch(world, node, "sg_category", "review")
+        assert node["mov64_codec"].value() == world.hm.DEFAULT_MOVIE_CODEC
 
     def test_output_name_is_sanitised_and_moves_the_path(self, world):
         node = world.handler.create_writenode_auto()
@@ -523,3 +542,39 @@ class TestMenuNamesThatDontMatchExactly(object):
         menu = PickyMenu("a", ["a", "b"])
         self._set(world, menu, "zzz")
         assert menu.value() == "a"
+
+    def test_prores_hq_matches_its_real_menu_entry_not_plain_or_4444(self, world):
+        menu = PickyMenu(
+            "H.264  avc1",
+            [
+                "Apple ProRes 4444  ap4h",
+                "Apple ProRes 422 HQ  apch",
+                "Apple ProRes 422  apcn",
+                "Apple ProRes 422 LT  apcs",
+                "H.264  avc1",
+            ],
+        )
+        self._set(world, menu, "Apple ProRes 422 HQ")
+        assert menu.value() == "Apple ProRes 422 HQ  apch"
+
+    def test_shortest_entry_wins_so_plain_422_does_not_become_422_hq(self, world):
+        """Requesting the plain "422" preset must not silently pick 422 HQ
+        (or LT) just because both start with "Apple ProRes 422"."""
+        menu = PickyMenu(
+            "x",
+            [
+                "Apple ProRes 422 HQ  apch",
+                "Apple ProRes 422  apcn",
+                "Apple ProRes 422 LT  apcs",
+            ],
+        )
+        self._set(world, menu, "Apple ProRes 422")
+        assert menu.value() == "Apple ProRes 422  apcn"
+
+    def test_four_character_codec_code_is_matched_too(self, world):
+        menu = PickyMenu(
+            "H.264  avc1",
+            ["Apple ProRes 422 HQ  apch", "Apple ProRes 4444  ap4h", "H.264  avc1"],
+        )
+        self._set(world, menu, "apch")
+        assert menu.value() == "Apple ProRes 422 HQ  apch"

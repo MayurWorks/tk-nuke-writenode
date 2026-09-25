@@ -121,4 +121,4 @@ def test_shipped_shot_config_drives_the_write_nodes(monkeypatch, templates):
     main["sg_category"].setValue("review")
     handler.knob_changed(main, main["sg_category"])
     assert main["file_type"].value() == "mov"
-    assert main["mov64_codec"].value() == "H.264"
+    assert main["mov64_codec"].value() == "Apple ProRes 422 HQ"
