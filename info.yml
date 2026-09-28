@@ -76,6 +76,11 @@ configuration:
     description: "After a local render of an image sequence, create - or update - a Read node named render_<output> next to the write node."
     default_value: false
 
+  auto_publish_local_renders:
+    type: bool
+    description: "After a successful LOCAL render (render_local, same Nuke process), automatically run the tk-multi-publish2 collect/validate/publish/finalize flow scoped to just that write node - no artist click required. Does NOT cover farm renders (render_farm submits async to Deadline in a separate process; whether that process can run this too depends on how Deadline launches Nuke - unconfirmed, see auto_publish.py). Idempotency is inherited from the existing collector (get_published_status() checks ShotGrid before offering a node for publish) and from Validate Render Completeness. Starts OFF: this is new, unexercised production behavior and should be turned on deliberately per-project once verified, not silently defaulted on."
+    default_value: false
+
   movie_codec:
     type: str
     description: "Codec every review/MOV write node uses - Nuke's raw mov64_codec value (e.g. 'appr' for Apple ProRes 422 HQ), NOT the dropdown display name: setting this knob by display name is unreliable and can silently apply a different codec (Foundry bug ID 368676). To find the raw value for a codec: create a mov Write node in Nuke, pick that codec from the dropdown, and read mov64_codec off the node's text (copy/paste or '!' in the Node Graph). Applied to every movie write regardless of what a category preset's settings.mov64_codec says - see DEFAULT_MOVIE_CODEC in handler.py. H.264 movies were not reliably viewable outside Nuke, which is why this exists instead of leaving codec to each preset."

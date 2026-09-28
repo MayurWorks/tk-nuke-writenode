@@ -17,6 +17,7 @@ import time
 import sgtk
 import nuke
 
+from . import auto_publish
 from . import autopilot
 from .create_dialog import WriteNodePanel
 
@@ -407,6 +408,26 @@ class NukeWriteNodeHandler(object):
 
             # Rendered without errors: keep the auto Read node in step
             self.__auto_read(node)
+
+            # Optionally auto-publish this node now that it has rendered.
+            # Off by default (see info.yml) - this is new, unexercised
+            # production behavior. Never let a failure here look like a
+            # failed render: log it and move on.
+            if self.app.get_setting("auto_publish_local_renders", False):
+                try:
+                    success, message = auto_publish.auto_publish_write_node(
+                        node
+                    )
+                    if not success:
+                        logger.info(
+                            "Auto-publish did not run for %s: %s"
+                            % (node.name(), message)
+                        )
+                except Exception:
+                    logger.exception(
+                        "Auto-publish raised unexpectedly for %s - the "
+                        "render itself was NOT affected." % node.name()
+                    )
 
         # If paths hasn't been set, let user know something went wrong
         else:
