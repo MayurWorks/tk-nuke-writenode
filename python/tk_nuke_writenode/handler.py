@@ -296,15 +296,17 @@ class NukeWriteNodeHandler(object):
     def __init__(self):
         self.app = sgtk.platform.current_bundle()
         self.sg = self.app.shotgun
-        # {project id: (looked up at, sg_color_pipeline value)}
+        # {(project id, shot id or None): (looked up at, sg_color_pipeline value)}
         self._pipeline_cache = {}
 
     def __get_pipeline_key(self):
         """
-        The current project's sg_color_pipeline value (None if unset or if
-        there is no project). Read live from ShotGrid - the same field
-        tk-nuke-projectsettings' _get_color_pipeline uses, so both apps
-        always agree - and cached for PIPELINE_CACHE_SECONDS.
+        The sg_color_pipeline value in force for the current context (None
+        if unset or if there is no project): the Shot's value if it has one,
+        otherwise the Project's. Same precedence as tk-nuke-projectsettings'
+        pipeline_settings.resolve_settings, so both apps always agree, even
+        when one shot overrides the project's pipeline. Read live from
+        ShotGrid and cached per (project, shot) for PIPELINE_CACHE_SECONDS.
 
         Raises whatever the ShotGrid query raises; __get_categories()
         turns that into a fall back to the static YAML.
@@ -315,15 +317,26 @@ class NukeWriteNodeHandler(object):
         if not project:
             return None
 
-        cached = self._pipeline_cache.get(project["id"])
+        entity = context.entity if context else None
+        shot_id = entity["id"] if entity and entity.get("type") == "Shot" else None
+
+        cache_key = (project["id"], shot_id)
+        cached = self._pipeline_cache.get(cache_key)
         if cached and time.time() - cached[0] < PIPELINE_CACHE_SECONDS:
             return cached[1]
 
-        result = self.sg.find_one(
-            "Project", [["id", "is", project["id"]]], ["sg_color_pipeline"]
-        )
-        key = (result or {}).get("sg_color_pipeline") or None
-        self._pipeline_cache[project["id"]] = (time.time(), key)
+        key = None
+        if shot_id is not None:
+            shot = self.sg.find_one(
+                "Shot", [["id", "is", shot_id]], ["sg_color_pipeline"]
+            )
+            key = (shot or {}).get("sg_color_pipeline") or None
+        if key is None:
+            result = self.sg.find_one(
+                "Project", [["id", "is", project["id"]]], ["sg_color_pipeline"]
+            )
+            key = (result or {}).get("sg_color_pipeline") or None
+        self._pipeline_cache[cache_key] = (time.time(), key)
         return key
 
     def __get_categories(self):

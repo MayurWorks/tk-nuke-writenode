@@ -346,9 +346,12 @@ class TestPerProjectPipeline(object):
     def test_pipeline_lookup_is_cached(self, world):
         world.app.shotgun.pipeline = "aces_acescg"
         world.handler.create_writenode_auto()
+        after_first_lookup = world.app.shotgun.calls
+        assert after_first_lookup >= 1
         world.handler.sync_all()
         world.handler.sync_all()
-        assert world.app.shotgun.calls == 1
+        # Shot + Project are each queried once, then served from the cache.
+        assert world.app.shotgun.calls == after_first_lookup
 
 
 class TestLegacyGroups(object):

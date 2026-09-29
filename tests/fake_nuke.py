@@ -493,8 +493,8 @@ class FakeApp(object):
             name: FakeTemplate(t.definition, root) for name, t in TEMPLATES.items()
         }
 
-    def get_setting(self, name):
-        return self._settings[name]
+    def get_setting(self, name, default=None):
+        return self._settings.get(name, default)
 
     def get_template(self, name):
         return self._templates[name]

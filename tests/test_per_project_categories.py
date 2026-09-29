@@ -17,8 +17,9 @@ import pytest
 
 
 class FakeShotgun:
-    def __init__(self, project_row=None, raise_on_find=False):
+    def __init__(self, project_row=None, raise_on_find=False, shot_row=None):
         self._project_row = project_row
+        self._shot_row = shot_row
         self._raise_on_find = raise_on_find
         self.find_one_calls = []
 
@@ -26,12 +27,15 @@ class FakeShotgun:
         self.find_one_calls.append((entity_type, filters, fields))
         if self._raise_on_find:
             raise RuntimeError("simulated ShotGrid connectivity failure")
+        if entity_type == "Shot":
+            return self._shot_row
         return self._project_row
 
 
 class FakeContext:
-    def __init__(self, project):
+    def __init__(self, project, entity=None):
         self.project = project
+        self.entity = entity
 
 
 class FakeEngine:
@@ -48,7 +52,7 @@ class FakeApp:
     def shotgun(self):
         return self._shotgun
 
-    def get_setting(self, name):
+    def get_setting(self, name, default=None):
         assert name == "categories"
         return self._static_categories
 
@@ -129,7 +133,8 @@ def handler_module(monkeypatch):
             del sys.modules[name]
 
 
-def _make_handler(hm, project_row=None, raise_on_find=False, static_categories=None):
+def _make_handler(hm, project_row=None, raise_on_find=False, static_categories=None,
+                  shot_row=None, shot_id=None):
     handler_mod = hm["handler_mod"]
     if static_categories is None:
         static_categories = [
@@ -138,9 +143,12 @@ def _make_handler(hm, project_row=None, raise_on_find=False, static_categories=N
                 "write_nodes": [{"name": "exr (dwaa 16bit)", "file_type": "exr"}],
             }
         ]
-    shotgun = FakeShotgun(project_row=project_row, raise_on_find=raise_on_find)
+    shotgun = FakeShotgun(project_row=project_row, raise_on_find=raise_on_find,
+                          shot_row=shot_row)
     app = FakeApp(shotgun=shotgun, static_categories=static_categories)
-    context = FakeContext(project={"type": "Project", "id": 91, "name": "storm"})
+    entity = {"type": "Shot", "id": shot_id, "name": "s"} if shot_id else None
+    context = FakeContext(project={"type": "Project", "id": 91, "name": "storm"},
+                          entity=entity)
     hm["engine_holder"].engine = FakeEngine(context)
     hm["engine_holder"].app = app
 
@@ -211,3 +219,46 @@ class TestGetCategories:
                     assert "publish_template" in write_node
                     assert "settings" in write_node
                     assert "colorspace" in write_node["settings"]
+
+
+class TestShotOverridesProjectPipeline:
+    def test_shot_pipeline_wins_over_project(self, handler_module):
+        handler, shotgun, _ = _make_handler(
+            handler_module,
+            project_row={"sg_color_pipeline": "aces_acescg"},
+            shot_row={"sg_color_pipeline": "rec709_sdr"},
+            shot_id=5827,
+        )
+        result = handler._NukeWriteNodeHandler__get_categories()
+        assert result == handler_module["handler_mod"].PER_PROJECT_WRITE_CATEGORIES["rec709_sdr"]
+
+    def test_empty_shot_inherits_project_pipeline(self, handler_module):
+        handler, shotgun, _ = _make_handler(
+            handler_module,
+            project_row={"sg_color_pipeline": "rec709_sdr"},
+            shot_row={"sg_color_pipeline": None},
+            shot_id=5827,
+        )
+        result = handler._NukeWriteNodeHandler__get_categories()
+        assert result == handler_module["handler_mod"].PER_PROJECT_WRITE_CATEGORIES["rec709_sdr"]
+
+    def test_project_context_does_not_query_shot(self, handler_module):
+        handler, shotgun, _ = _make_handler(
+            handler_module, project_row={"sg_color_pipeline": "rec709_sdr"}
+        )
+        handler._NukeWriteNodeHandler__get_categories()
+        assert [c[0] for c in shotgun.find_one_calls] == ["Project"]
+
+    def test_cache_is_per_shot(self, handler_module):
+        handler, shotgun, _ = _make_handler(
+            handler_module,
+            project_row={"sg_color_pipeline": "aces_acescg"},
+            shot_row={"sg_color_pipeline": "rec709_sdr"},
+            shot_id=1,
+        )
+        get = handler._NukeWriteNodeHandler__get_pipeline_key
+        assert get() == "rec709_sdr"
+        # switch to another shot (no override) in the same session
+        handler_module["engine_holder"].engine.context.entity = {"type": "Shot", "id": 2}
+        shotgun._shot_row = {"sg_color_pipeline": None}
+        assert get() == "aces_acescg"
